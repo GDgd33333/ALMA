@@ -1,6 +1,6 @@
 #!/bin/bash
 # Install SC2 and add the custom maps
-
+'''
 if [ -z "$EXP_DIR" ]
 then
     EXP_DIR=~
@@ -10,6 +10,17 @@ echo "EXP_DIR: $EXP_DIR"
 cd $EXP_DIR/pymarl
 
 mkdir 3rdparty
+cd 3rdparty
+
+'''
+
+# 仓库根目录
+PROJECT_ROOT="$(cd "$(dirname "$0")" && pwd)"
+echo "PROJECT_ROOT: $PROJECT_ROOT"
+cd "$PROJECT_ROOT"
+
+# 统一在根目录 3rdparty 下安装
+mkdir -p 3rdparty
 cd 3rdparty
 
 export SC2PATH=`pwd`'/StarCraftII'
@@ -41,4 +52,3 @@ rm -rf SMAC_Maps.zip
 cp src/envs/starcraft2/maps/SMAC_Maps/empty_passive.SC2Map $MAP_DIR
 
 echo 'StarCraft II and SMAC are installed.'
-

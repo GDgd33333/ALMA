@@ -1,10 +1,61 @@
-运行：
-  source /data/gu-di/miniconda3/etc/profile.d/conda.sh
-下载包：
-    pip install protobuf==3.20.3 -i http://mirrors.aliyun.com/pypi/simple/ --trusted-host mirrors.aliyun.com
+# 飞书上：ALMA代码中有具体完整的运行命令说明
 
-运行命令：
-  python3 main.py --env-config=ff --config=qmix_atten --agent.subtask_cond='mask' --hier_agent.task_allocation='aql'
+
+1）：运行save the city 环境
+# 让当前 Shell 认识 conda（非登录 shell 时必需）
+source /data/gu-di/miniconda3/etc/profile.d/conda.sh
+
+# 激活pytorch 环境
+conda activate pytorch
+
+# 下载包：
+pip install protobuf==3.20.3 -i http://mirrors.aliyun.com/pypi/simple/ --trusted-host mirrors.aliyun.com
+
+# 一、开训练会话
+
+# 1. 新建一个 tmux 会话 (叫 ALMAff)
+tmux new -s ALMAff
+
+# 2. 在会话里启动训练，并保存日志
+tmux new -s ALMAsavethecity
+
+# 进入会话后再手动：
+source /data/gu-di/miniconda3/etc/profile.d/conda.sh
+conda activate pytorch
+cd ~/ALMA-main/src
+
+
+CUDA_VISIBLE_DEVICES=1 python3 main.py --env-config=ff --config=qmix_atten --agent.subtask_cond='mask' --hier_agent.task_allocation='aql' --epsilon_anneal_time=2000000 --use_tensorboard=True --save_model=True --save_model_interval=1000000 --hier_agent.action_length=5 2>&1 | tee ALMAsavethecity.log
+
+
+tensorboard --logdir /data/gu-di/ALMA-main/results/tb_logs --port 6001 --host 127.0.0.1
+
+
+# 如果不小心关掉了：
+  tmux ls   #查看有哪些会话
+  tmux attach -t ALMAff  # ALMAff 是会话名
+# 删除会话
+  tmux kill-session -t ALMAff
+
+# 说明：
+  # --env-config=ff:
+    选择 SaveTheCity 环境（在本仓库里用缩写 ff 表示）。
+  # --config=qmix_atten:
+    选择低层控制算法的配置为 qmix_atten（带注意力的 QMIX 变体，便于多 agent 的信息聚合/混合）。
+  # --agent.subtask_cond='mask'（ALMA 推荐项）:
+    高层决定子任务后，低层 agent 接收被mask后的子任务条件。这能限制无关信息干扰、稳定训练。对照项：'full_obs' 表示低层看到完整观测（无遮罩）。
+  # --hier_agent.task_allocation='aql'（ALMA 核心）:
+    高层的“任务分配”模块采用 Allocation Q-Learning (AQL) 来把子任务分派给不同 agent 群组/个体，是 ALMA 的关键设计。对照项：'heuristic' 使用手工启发式分配（见下面的 --env_args.heuristic_style），或 --hier_agent.copa=True 切到 COPA 方法。
+  # --epsilon_anneal_time=2000000（环境推荐）:
+    探索率 epsilon 的线性退火步数；
+  # --hier_agent.action_length=5（层级方法推荐）:
+    高层动作的持续步长（也可理解为宏动作长度或分配策略的持有时间）。对分层方法（ALMA/COPA/启发式）仓库建议 5（StarCraft 则建议 3）。
+
+
+
+
+
+
 
 
 # ALMA

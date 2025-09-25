@@ -177,136 +177,167 @@ def evaluate_sequential(args, runner, logger):
         runner.save_replay()
     return res_dict, all_subtask_infos
 
-
+'''
+Runner 负责和环境交互，按 pre/post_transition_items 把每步数据打包成 EpisodeBatch。
+ReplayBuffer 用 scheme + groups + preprocess 定义“怎么存、怎么取、如何 one-hot 化”等。
+MAC 是策略前向（多智能体参数共享或实体输入等），Learner 负责优化（值网络/混合器/策略头）。
+训练主循环是：rollout → buffer.insert → sample → learner.train → 定期eval → 定期save。
+若用 AQL 分配器，会额外按“近期数据”再做一次专门的训练（时间过滤 t_added）
+'''
 def run_sequential(args, logger):
     # Init runner so we can get env info
+    # 初始化 runner 前，对环境参数做前置整理 
+    # 若环境字典里显式给了 entity 模式开关，则用之；否则默认关闭
     if 'entity_scheme' in args.env_args:
         args.entity_scheme = args.env_args['entity_scheme']
     else:
         args.entity_scheme = False
 
+    # 某些环境族（自定义 SC2、多军团、消防员 ff）需要根据场景名生成 scenario_dict
     if args.env in ['sc2custom', 'sc2multiarmy', 'ff']:
-        rs = RandomState(0)
+        rs = RandomState(0)  # 固定随机种子，生成可复现实验的场景
         args.env_args['scenario_dict'] = s_REGISTRY[args.scenario](rs=rs)
 
+    # 若任务分配策略选择启发式（heuristic），通知环境走启发式分配路径
     if args.hier_agent["task_allocation"] == 'heuristic':
         args.env_args['heuristic_alloc'] = True
 
+    # 对自定义的 sc2 环境，可能需要给到“额外标签”的数量
     if ('sc2custom' == args.env or 'sc2multiarmy' == args.env):
         args.env_args['n_extra_tags'] = args.n_extra_units
 
+    # 如果没有显式给 mixer 的子任务条件（subtask_cond），则与 agent 的一致
     if args.mixer_subtask_cond is None:
         args.mixer_subtask_cond = args.agent["subtask_cond"]
+    
+    # 实例化 Runner（负责与环境交互、收集轨迹）
     runner = r_REGISTRY[args.runner](args=args, logger=logger)
 
     # Set up schemes and groups here
-    env_info = runner.get_env_info()
-    args.n_agents = env_info["n_agents"]
-    args.n_actions = env_info["n_actions"]
+    # —— 根据环境信息配置数据 schema、group、preprocess —— 
+    env_info = runner.get_env_info()       # 取出环境报告的 shape、上限等
+    args.n_agents = env_info["n_agents"]   # 智能体数
+    args.n_actions = env_info["n_actions"] # 动作数
+    
     if not args.entity_scheme:
+        # 非 entity 模式：使用“state/obs”扁平方案
         args.state_shape = env_info["state_shape"]
-        # Default/Base scheme
+
+        # ReplayBuffer 存储的字段定义（每个时间步要写什么）
         scheme = {
-            "state": {"vshape": env_info["state_shape"]},
-            "obs": {"vshape": env_info["obs_shape"], "group": "agents"},
-            "actions": {"vshape": (1,), "group": "agents", "dtype": th.long},
-            "avail_actions": {"vshape": (env_info["n_actions"],), "group": "agents", "dtype": th.int},
-            "reward": {"vshape": (1,)},
-            "terminated": {"vshape": (1,), "dtype": th.uint8},
-            "reset": {"vshape": (1,), "dtype": th.uint8},
-            "ep_num": {"vshape": (1,), "dtype": th.long, "episode_const": True}
+            "state": {"vshape": env_info["state_shape"]},         # 全局状态
+            "obs": {"vshape": env_info["obs_shape"], "group": "agents"},   # 每个 agent 的局部观测
+            "actions": {"vshape": (1,), "group": "agents", "dtype": th.long},  # 离散动作索引
+            "avail_actions": {"vshape": (env_info["n_actions"],), "group": "agents", "dtype": th.int},  # 可行动作掩码
+            "reward": {"vshape": (1,)},                           # 标量奖励
+            "terminated": {"vshape": (1,), "dtype": th.uint8},    # 回合终止标记
+            "reset": {"vshape": (1,), "dtype": th.uint8},         # 环境是否 reset（有些环境需要）
+            "ep_num": {"vshape": (1,), "dtype": th.long, "episode_const": True}    # 回合编号（对整条轨迹常量）
         }
         groups = {
-            "agents": args.n_agents
+            "agents": args.n_agents   # 指定“agents”这条轴的长度（多智能体维度）
         }
+        # 定义“转移前/后”需要从环境采集的键（用于 runner 收集 & buffer 写入）
         args.pre_transition_items = ['state', 'obs', 'avail_actions']
         args.post_transition_items = ['reward', 'terminated', 'reset']
+
+        # 若环境提供了掩码（将大向量中特定切片映射到不同实体），存起来供模型使用
         if 'masks' in env_info:
-            # masks that identify what part of observation/state spaces correspond to each entity
             args.obs_masks, args.state_masks = env_info['masks']
+        # 单位（entity/unit）维度可选信息
         if 'unit_dim' in env_info:
             args.unit_dim = env_info['unit_dim']
     else:
+        # entity 模式：输入为“实体列表”，每步数量固定为 n_entities，带掩码表明哪些有效
         args.entity_shape = env_info["entity_shape"]
         args.n_entities = env_info["n_entities"]
-        # Entity scheme
+
         scheme = {
-            "entities": {"vshape": env_info["entity_shape"], "group": "entities"},
-            "obs_mask": {"vshape": env_info["n_entities"], "group": "entities", "dtype": th.uint8},
-            "entity_mask": {"vshape": env_info["n_entities"], "dtype": th.uint8},
-            "actions": {"vshape": (1,), "group": "agents", "dtype": th.long},
+            "entities": {"vshape": env_info["entity_shape"], "group": "entities"},    # (n_entities, feat_dim)
+            "obs_mask": {"vshape": env_info["n_entities"], "group": "entities", "dtype": th.uint8}, # 每个 agent 的可见实体掩码
+            "entity_mask": {"vshape": env_info["n_entities"], "dtype": th.uint8},     # 哪些实体在当前步有效
+            "actions": {"vshape": (1,), "group": "agents", "dtype": th.long},         # 离散动作
             "avail_actions": {"vshape": (env_info["n_actions"],), "group": "agents", "dtype": th.int},
             "reward": {"vshape": (1,)},
             "terminated": {"vshape": (1,), "dtype": th.uint8},
             "reset": {"vshape": (1,), "dtype": th.uint8},
-            "t_added": {"vshape": (1,), "dtype": th.long, "episode_const": True}
+            "t_added": {"vshape": (1,), "dtype": th.long, "episode_const": True}      # 样本加入缓冲的时间戳（用于时间衰减过滤）
         }
+        # entity 模式下，前/后转移需要收集的字段
         args.pre_transition_items = ['entities', 'obs_mask', 'entity_mask', 'avail_actions']
         args.post_transition_items = ['reward', 'terminated', 'reset']
         groups = {
             "agents": args.n_agents,
             "entities": args.n_entities
         }
+
+         # 多任务（multi_task）扩展：额外的任务掩码与任务奖励
         if args.multi_task:
             args.n_tasks = env_info["n_tasks"]
-            scheme["entity2task_mask"] = {"vshape": args.n_tasks, "group": "entities", "dtype": th.uint8}
-            scheme["task_mask"] = {"vshape": args.n_tasks, "dtype": th.uint8}
+            scheme["entity2task_mask"] = {"vshape": args.n_tasks, "group": "entities", "dtype": th.uint8}  # 实体到任务的映射掩码
+            scheme["task_mask"] = {"vshape": args.n_tasks, "dtype": th.uint8}                              # 当前步哪些任务有效
             args.pre_transition_items += ["entity2task_mask", "task_mask"]
-            args.post_transition_items += ["task_rewards", "tasks_terminated"] #, "oracle_attribution"]
+            args.post_transition_items += ["task_rewards", "tasks_terminated"]  # 每个任务的奖励与终止
             scheme["task_rewards"] = {"vshape": args.n_tasks}
             scheme["tasks_terminated"] = {"vshape": args.n_tasks, "dtype": th.uint8}
-            # scheme["oracle_attribution"] = {"vshape": args.n_tasks, "group": "agents", "dtype": th.uint8}
+            # 若使用分层/分配（层次智能体）则加一个决策标志位
             if args.hier_agent["task_allocation"] is not None or args.hier_agent["copa"]:
                 scheme["hier_decision"] = {"vshape": (1,), "dtype": th.uint8}
                 args.pre_transition_items += ['hier_decision']
 
+    # 预处理：将离散动作索引转 one-hot（很多算法/混合器需要）
     preprocess = {
         "actions": ("actions_onehot", [OneHot(out_dim=args.n_actions)])
     }
 
-    buffer = ReplayBuffer(scheme, groups, args.buffer_size, env_info["episode_limit"] + 1,
-                          preprocess=preprocess,
-                          device="cpu" if args.buffer_cpu_only else args.device,
-                          efficient_store=args.buffer_opt_mem,
-                          max_traj_len=args.max_traj_len)
+    # 创建经验回放缓冲区
+    buffer = ReplayBuffer(
+        scheme, groups, args.buffer_size, env_info["episode_limit"] + 1,  # 轨迹长度 = episode_limit+1（含终止步）
+        preprocess=preprocess,
+        device="cpu" if args.buffer_cpu_only else args.device,            # 可把存储放 CPU 节省显存
+        efficient_store=args.buffer_opt_mem,                              # 内存优化开关
+        max_traj_len=args.max_traj_len                                    # 可选：用于截断长轨迹
+    )
 
-    # Setup multiagent controller here
-    mac = mac_REGISTRY[args.mac](buffer.scheme, groups, args)
-
-    # Give runner the scheme
+    # —— 创建多智能体控制器（策略）并绑定给 runner ——
+    mac = mac_REGISTRY[args.mac](buffer.scheme, groups, args)  # e.g., BasicMAC / entity 版本 MAC
     runner.setup(scheme=scheme, groups=groups, preprocess=preprocess, mac=mac)
 
-    # Learner
+    # —— Learner 负责参数更新（值函数/混合器/优化器等） ——
     learner = le_REGISTRY[args.learner](mac, buffer.scheme, logger, args)
 
     if args.use_cuda:
-        learner.cuda()
+        learner.cuda()  # 把网络移动到 GPU
 
+
+    # —— 处理从 wandb checkpoint 加载（可选） ——
     if args.checkpoint_run_name != "" or args.checkpoint_unique_id != "":
-        assert not (args.checkpoint_run_name != ""
-                    and args.checkpoint_unique_id != ""), (
-                        "Can only specify one of checkpoint_run_name or checkpoint_unique_id"
-                    )
+        assert not (args.checkpoint_run_name != "" and args.checkpoint_unique_id != ""), \
+            "两种 checkpoint 指定方式只能二选一"
         wandb_api = wandb.Api()
         pi_runs = None
         if args.checkpoint_run_name != "":
-            exp_runs = get_wandb_runs(args.checkpoint_run_name, wandb_api, args)
+            exp_runs = get_wandb_runs(args.checkpoint_run_name, wandb_api, args)  # 根据 run_name 拉取候选
             if args.pi_checkpoint_run_name != "":
+                # 只加载策略部分的 run（支持“same”轮换不同种子）
                 if args.pi_checkpoint_run_name == "same":
-                    assert len(exp_runs) > 1, "Need multiple seeds to swap policies"
+                    assert len(exp_runs) > 1, "需要多个 seed 才能做轮换加载"
                     pi_runs = list(exp_runs)[1:] + list(exp_runs)[:1]
                 else:
                     pi_runs = get_wandb_runs(args.pi_checkpoint_run_name, wandb_api, args)
+            # 若 eval_all_models=True，则对所有 run 评估；否则只取最优的一个
             if args.eval_all_models:
                 runs = exp_runs
             else:
-                # take model with the best final performance
                 runs = [exp_runs[0]]
         elif args.checkpoint_unique_id != "":
+            # 通过唯一 id 精确指定一个 wandb run
             runs = [wandb_api.run(f'{args.wb_entity}/task-allocation/{args.checkpoint_unique_id}')]
 
+    # —— 只评估/保存回放（不训练）的分支 —— 
     if args.checkpoint_run_name != "" or args.checkpoint_unique_id != "" or args.env_args.get('heuristic_ai', False):
         if args.evaluate or args.save_replay:
+            # 若要求把评估结果写到文件，先准备输出路径/文件名
             if args.eval_path is not None:
                 os.makedirs(dirname(args.eval_path), exist_ok=True)
                 eval_basename_split = splitext(basename(args.eval_path))
@@ -317,16 +348,19 @@ def run_sequential(args, logger):
                 eval_filename = join(dirname(args.eval_path), eval_basename)
 
             if args.checkpoint_run_name != "" or args.checkpoint_unique_id != "":
+                # 逐个加载 wandb run 的模型并评估
                 results = []
                 for i, wb_run in enumerate(runs):
                     logger.console_logger.info(f"Evaluating model {i + 1}/{len(runs)}")
-                    load_run(args, wb_run, learner, runner, logger)
+                    load_run(args, wb_run, learner, runner, logger)  # 载入 value/mixer/actor 等
                     if pi_runs is not None:
+                        # 只替换策略（π）权重做组合评估
                         pi_run = pi_runs[i % len(pi_runs)]
                         load_run(args, pi_run, learner, runner, logger, pi_only=True)
                     res_dict, all_subtask_infos = evaluate_sequential(args, runner, logger)
                     results.append(res_dict)
 
+                # 写评估结果（可按任务拆分/或整体）
                 if args.eval_path is not None:
                     if args.eval_sep:
                         write_struct = all_subtask_infos
@@ -335,53 +369,59 @@ def run_sequential(args, logger):
                     with open(eval_filename, 'w') as f:
                         json.dump(write_struct, f)
             else:
-                # heuristic
+                # 纯启发式 agent 的评估
                 res_dict, all_subtask_infos = evaluate_sequential(args, runner, logger)
+
             runner.close_env()
             logger.print_stats_summary()
-            return
+            return  # 评估完成直接退出
 
-    # start training
+    # —— 正式进入训练主循环 ——
     episode = 0
-    last_test_T = -args.test_interval - 1
-    last_log_T = 0
-    model_save_time = 0
+    last_test_T = -args.test_interval - 1  # 上次测试时间步（初始化成足够小，保证第一次触发）
+    last_log_T = 0                         # 上次打印日志的时间步
+    model_save_time = 0                    # 上次保存模型的时间步
 
     start_time = time.time()
     last_time = start_time
 
     logger.console_logger.info("Beginning training for {} timesteps".format(args.t_max))
-
+    
     while runner.t_env <= args.t_max:
 
-        # Run for a whole episode at a time
-        episode_batch, _ = runner.run(test_mode=False)
-        buffer.insert_episode_batch(episode_batch)
+        # 每次收集“一个完整回合”的数据
+        episode_batch, _ = runner.run(test_mode=False)  # 与环境交互，返回一个 EpisodeBatch
+        buffer.insert_episode_batch(episode_batch)      # 写入回放缓冲
 
+        # 当缓冲可采样时，执行若干次训练迭代
         if buffer.can_sample(args.batch_size):
             for _ in range(args.training_iters):
-                episode_sample = buffer.sample(args.batch_size)
+                episode_sample = buffer.sample(args.batch_size)   # 采样一个 batch 的若干回合片段
 
-                # Truncate batch to only filled timesteps
+                # 只保留每条轨迹中已填充的时间步（去掉尾部空白）
                 max_ep_t = episode_sample.max_t_filled()
                 episode_sample = episode_sample[:, :max_ep_t]
 
+                # 把数据张量搬到目标设备（CPU/GPU）
                 if episode_sample.device != args.device:
                     episode_sample.to(args.device)
 
+                # 参数更新一步
                 learner.train(episode_sample, runner.t_env, episode)
 
+                # —— 若层次分配器是 AQL，还需要单独抽样“较新”的数据再训一次 —— 
                 if args.hier_agent["task_allocation"] in ["aql"]:
                     filters = {}
                     if args.hier_agent['decay_old'] > 0:
                         cutoff = args.hier_agent['decay_old']
+                        # 仅使用“近期加入”的数据（根据 t_added 做时间窗口过滤）
                         filters['t_added'] = lambda t_added: (runner.t_env - t_added) <= cutoff
                     if not buffer.can_sample(args.batch_size, filters=filters):
                         continue
 
                     alloc_episode_sample = buffer.sample(args.batch_size, filters=filters)
 
-                    # Truncate batch to only filled timesteps
+                    # 同样裁掉未填满的时间步
                     max_ep_t = alloc_episode_sample.max_t_filled()
                     alloc_episode_sample = alloc_episode_sample[:, :max_ep_t]
 
@@ -389,9 +429,10 @@ def run_sequential(args, logger):
                         alloc_episode_sample.to(args.device)
 
                     elif args.hier_agent["task_allocation"] == "aql":
+                        # 训练 AQL 分配器
                         learner.alloc_train_aql(alloc_episode_sample, runner.t_env, episode)
 
-        # Execute test runs once in a while
+        # —— 按间隔做评估回合（不更新参数） ——
         n_test_runs = max(1, args.test_nepisode // runner.batch_size)
         if (runner.t_env - last_test_T) / args.test_interval >= 1.0:
 
@@ -402,8 +443,9 @@ def run_sequential(args, logger):
 
             last_test_T = runner.t_env
             for _ in range(n_test_runs):
-                runner.run(test_mode=True)
+                runner.run(test_mode=True)  # 仅前向评估性能
 
+        # —— 按间隔或训练结束时保存模型 —— 
         if args.save_model and (runner.t_env - model_save_time >= args.save_model_interval or
                                 model_save_time == 0 or
                                 runner.t_env > args.t_max):
@@ -414,17 +456,19 @@ def run_sequential(args, logger):
                 save_path_base = os.path.join("results/models", args.unique_token, str(runner.t_env), "")
             os.makedirs(os.path.dirname(save_path_base), exist_ok=True)
             logger.console_logger.info("Saving models to {}".format(os.path.dirname(save_path_base)))
-            # learner should handle saving/loading -- delegate actor save/load to mac,
-            # use appropriate filenames to do critics, optimizer states
+            # 交给 learner 自己序列化 actor/critic/优化器等
             learner.save_models(save_path_base)
 
+        # 逻辑上“推进 episode 计数”（若一次 run 收集多回合，这里通常等于 batch_size_run）
         episode += args.batch_size_run
 
+        # —— 打印训练统计 —— 
         if (runner.t_env - last_log_T) >= args.log_interval:
             logger.log_stat("episode", episode, runner.t_env)
             logger.print_recent_stats()
             last_log_T = runner.t_env
 
+    # 训练结束，清理环境
     runner.close_env()
     logger.console_logger.info("Finished Training")
 
