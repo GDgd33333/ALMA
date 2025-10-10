@@ -12,7 +12,6 @@ import sys
 import torch as th
 from utils.logging import get_logger
 import yaml
-import datetime
 
 from run import run
 
@@ -47,29 +46,6 @@ wandb_ignore_params = [
 
 
 def main(config):
-    # -------------------------------------------------------
-    # ------------------ 自动保存控制台输出 ------------------
-    # -------------------------------------------------------
-    log_base = os.path.join(os.path.dirname(__file__), "runs")
-    os.makedirs(log_base, exist_ok=True)
-    now = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_id = f"{config['name']}_{now}"
-    log_dir = os.path.join(log_base, run_id)
-    os.makedirs(log_dir, exist_ok=True)
-
-    # 重定向 stdout 和 stderr 到 log.txt
-    log_file = os.path.join(log_dir, "log.txt")
-    sys.stdout = open(log_file, 'w')
-    sys.stderr = sys.stdout
-    print(f"[INFO] Logging to: {log_file}")
-
-    # 保存 config
-    with open(os.path.join(log_dir, "config.yaml"), "w") as f:
-        yaml.dump(config, f)
-    # -------------------------------------------------------
-    # -------------------------------------------------------
-    # -------------------------------------------------------
-
     # Setting the random seed throughout the modules
     config['seed'] = np.random.randint(999999)
     np.random.seed(config["seed"])
