@@ -1,7 +1,4 @@
-论文中参数训练命令：
-tmux new -s save25paper
-
-# 进入会话后再手动：
+# 论文中参数训练命令：
 cd ~/ALMA-main/src
 
 python main.py \
@@ -16,7 +13,7 @@ python main.py \
   --epsilon_anneal_time=2000000 \
   --use_tensorboard=True \
   --save_model=True \
-  --save_model_interval=1000000 \0
+  --save_model_interval=1000000 \
   2>&1 | tee ALMAsave25paper.log
 
 
