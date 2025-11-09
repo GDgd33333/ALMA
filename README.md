@@ -96,6 +96,8 @@ CUDA_VISIBLE_DEVICES=1 python main.py \
   --save_model_interval=1000000 \
   2>&1 | tee ALMAsave25_heuristic.log
 
+------------------------------------------------------------------------------
+
 # ALMA
 Code for [*ALMA: Hierarchical Learning for Composite Multi-Agent Tasks*](https://openreview.net/forum?id=JUXn1vXcrLA) (Iqbal et al., NeurIPS 2022)
 
