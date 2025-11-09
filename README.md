@@ -1,3 +1,101 @@
+# save the city运行命令
+tmux new -s ALMA
+
+进入会话后再手动：
+source /data/gu-di/miniconda3/etc/profile.d/conda.sh
+conda activate pytorch
+cd ~/ALMA/src
+
+python main.py \
+  --env-config=ff \
+  --config=qmix_atten \
+  --agent.subtask_cond=mask \
+  --hier_agent.task_allocation=aql \
+  --hier_agent.action_length=5 \
+  --epsilon_anneal_time=2000000 \
+  --use_tensorboard=True \
+  --save_model=True \
+  --save_model_interval=1000000 \
+  2>&1 | tee ALMAsave25.log
+
+
+# SMAC运行命令：
+tmux new -s ALMAsmac1
+
+source /data/gu-di/miniconda3/etc/profile.d/conda.sh
+conda activate pytorch
+cd ~/ALMA/src
+export SC2PATH=/data/gu-di/ALMA/3rdparty/StarCraftII
+ls $SC2PATH
+
+CUDA_VISIBLE_DEVICES=1 python main.py --config=refil --env-config=sc2multiarmy --scenario=6-8sz_maxsize4_maxarmies3_symmetric --agent.subtask_cond=mask --hier_agent.task_allocation=aql --hier_agent.action_length=3 --use_tensorboard=True --save_model=True --save_model_interval=1000000 2>&1 | tee ALMA_smac_68sz_symmetric.log
+
+
+------------------------------------------------------------------------------
+tmux new -s ALMAsmac2
+
+
+source /data/gu-di/miniconda3/etc/profile.d/conda.sh
+conda activate pytorch
+cd ~/ALMA/src
+export SC2PATH=/data/gu-di/ALMA/3rdparty/StarCraftII
+ls $SC2PATH
+
+
+CUDA_VISIBLE_DEVICES=1 python main.py --config=refil --env-config=sc2multiarmy --scenario=6-8sz_maxsize4_maxarmies3_unitdisadvantage --agent.subtask_cond=mask --hier_agent.task_allocation=aql --hier_agent.action_length=3 --use_tensorboard=True  --save_model=True --save_model_interval=1000000 2>&1 | tee ALMA_smac_68sz_unitdisadvantage.log
+
+------------------------------------------------------------------------------
+tmux new -s ALMAsmac3
+
+
+source /data/gu-di/miniconda3/etc/profile.d/conda.sh
+conda activate pytorch
+cd ~/ALMA/src
+export SC2PATH=/data/gu-di/ALMA/3rdparty/StarCraftII
+ls $SC2PATH
+
+CUDA_VISIBLE_DEVICES=1 python main.py --config=refil --env-config=sc2multiarmy --scenario=6-8MMM_maxsize4_maxarmies3_symmetric --agent.subtask_cond=mask --hier_agent.task_allocation=aql --hier_agent.action_length=3 --use_tensorboard=True  --save_model=True --save_model_interval=1000000 2>&1 | tee ALMA_smac_68MMM_symmetric.log
+
+
+------------------------------------------------------------------------------
+tmux new -s ALMAsmac4
+
+
+source /data/gu-di/miniconda3/etc/profile.d/conda.sh
+conda activate pytorch
+cd ~/ALMA/src
+export SC2PATH=/data/gu-di/ALMA/3rdparty/StarCraftII
+ls $SC2PATH
+
+
+CUDA_VISIBLE_DEVICES=1 python main.py --config=refil --env-config=sc2multiarmy --scenario=6-8MMM_maxsize4_maxarmies3_unitdisadvantage --agent.subtask_cond=mask --hier_agent.task_allocation=aql --hier_agent.action_length=3 --use_tensorboard=True  --save_model=True --save_model_interval=1000000 2>&1 | tee ALMA_smac_68MMM_unitdisadvantage.log
+
+
+
+
+
+
+# 启发式算法运行命令
+启发式算法：
+tmux new -s saveheuristic
+
+
+source /data/gu-di/miniconda3/etc/profile.d/conda.sh
+conda activate pytorch
+cd ~/ALMA/src
+
+CUDA_VISIBLE_DEVICES=1 python main.py \
+  --env-config=ff \
+  --config=qmix_atten \
+  --agent.subtask_cond=mask \
+  --hier_agent.task_allocation='heuristic' \
+  --hier_agent.action_length=5 \
+  --epsilon_anneal_time=2000000 \
+  --use_tensorboard=True \
+  --save_model=True \
+  --save_model_interval=1000000 \
+  2>&1 | tee ALMAsave25_heuristic.log
+
 # ALMA
 Code for [*ALMA: Hierarchical Learning for Composite Multi-Agent Tasks*](https://openreview.net/forum?id=JUXn1vXcrLA) (Iqbal et al., NeurIPS 2022)
 
